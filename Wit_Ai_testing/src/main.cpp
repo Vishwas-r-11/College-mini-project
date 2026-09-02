@@ -27,11 +27,11 @@ void setup() {
   // Connect to Wi-Fi and wit.ai
   if (tts.begin(ssid,password,apiKey)) {
     Serial.println("✓ TTS Ready!\n");
-    tts.setVoice("wit$Colin");
-    tts.setStyle("default");
-    tts.setSpeed(80);
+    tts.setVoice("wit$Charlie");  // Try Rebecca - clearer female voice
+    tts.setStyle("projected");         // Softer articulation
+    tts.setSpeed(87);             // Slightly slower for clarity
     tts.setPitch(100);
-    tts.setGain(1);
+    tts.setGain(2);             // Increase volume for better clarity
     tts.printConfig();
     Serial.println("Type any text and press Enter to speak:\n");
   } else {
