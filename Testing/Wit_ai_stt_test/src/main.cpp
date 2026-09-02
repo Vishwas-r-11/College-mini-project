@@ -211,7 +211,7 @@ void setup() {
   Serial.println("\n📝 Instructions:");
   Serial.println("   1. Press Enter to START recording");
   Serial.println("   2. Speak into the microphone");
-  Serial.println("   3. Press Enter again to STOP and transcribe");
+  Serial.println("   3. Press Enter a to STOP and transcribe");
   Serial.println("\nReady! Waiting for your command...\n");
 }
 
