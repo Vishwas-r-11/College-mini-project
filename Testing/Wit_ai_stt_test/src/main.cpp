@@ -12,24 +12,36 @@ const char* password = "ramesh-Gayathri,251114";
 const char* witAiToken = "Z62K6NE3EDFQNBCYKNQNNWL3JGBK3L54";
 const char* witAiUrl = "https://api.wit.ai/speech?v=20220622";
 
-// I2S pins for INMP441
+// I2S pins for INMP441 (ESP32-S3 configured pins)
 #define I2S_WS 7    // LRC (Word Select) - GPIO07
 #define I2S_SD 8    // SD (Serial Data) - GPIO08
 #define I2S_SCK 10  // SCK (Serial Clock) - GPIO10
 
-
-// I2S configuration
+// Audio configuration
 #define I2S_PORT I2S_NUM_0
 #define SAMPLE_RATE 16000
 #define BITS_PER_SAMPLE 16
 #define I2S_BUFFER_SIZE 512
 #define RECORD_TIME_SECONDS 10  // Maximum recording time
+#define VOLUME_GAIN 4           // Software gain multiplier (boosts mic sensitivity)
 
 // Audio buffer
 const int maxRecordSize = SAMPLE_RATE * RECORD_TIME_SECONDS * 2; // 2 bytes per sample
 uint8_t* audioBuffer = nullptr;
 int audioBufferIndex = 0;
 bool isRecording = false;
+unsigned long lastDisplayTime = 0;
+
+// Function to amplify audio samples
+void applyGain(int16_t* samples, int count) {
+  for (int i = 0; i < count; i++) {
+    int32_t val = (int32_t)samples[i] * VOLUME_GAIN;
+    // Clip to 16-bit signed range [-32768, 32767]
+    if (val > 32767) val = 32767;
+    else if (val < -32768) val = -32768;
+    samples[i] = (int16_t)val;
+  }
+}
 
 // Function to initialize I2S
 void i2sInit() {
@@ -94,17 +106,55 @@ void connectWiFi() {
 void startRecording() {
   audioBufferIndex = 0;
   isRecording = true;
-  Serial.println("\n🎤 Recording started... Press Enter to stop.");
+  lastDisplayTime = millis();
+  Serial.println("\n🎤 Recording started... Speak now! (Send '2' to stop)");
 }
 
 // Function to stop recording and process
 void stopRecording() {
   isRecording = false;
-  Serial.println("⏹️  Recording stopped.");
+  Serial.println("\n⏹️  Recording stopped.");
   Serial.printf("Recorded %d bytes (%d samples, %.2f seconds)\n",
                 audioBufferIndex,
                 audioBufferIndex / 2,
                 (float)audioBufferIndex / 2.0 / SAMPLE_RATE);
+}
+
+// Function to extract full text from Wit.ai multi-chunk/NDJSON response
+String parseWitAiResponse(const String& response) {
+  String bestText = "";
+  int searchPos = 0;
+
+  // Wit.ai returns chunked/newline-delimited JSON (NDJSON)
+  // We iterate through every JSON object in the response to extract the final full text
+  while (searchPos < response.length()) {
+    int objStart = response.indexOf('{', searchPos);
+    if (objStart == -1) break;
+
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, response.substring(objStart));
+    if (!error) {
+      if (!doc["text"].isNull()) {
+        String currentText = doc["text"].as<String>();
+        if (currentText.length() > 0) {
+          bestText = currentText;
+        }
+      }
+      // If final flag is present, this is definitely the complete sentence
+      if (doc["is_final"].is<bool>() && doc["is_final"].as<bool>()) {
+        break;
+      }
+    }
+
+    int nextLine = response.indexOf('\n', objStart);
+    if (nextLine != -1) {
+      searchPos = nextLine + 1;
+    } else {
+      break;
+    }
+  }
+
+  return bestText;
 }
 
 // Function to send audio to Wit.ai for speech-to-text
@@ -122,6 +172,7 @@ void sendToWitAi() {
   Serial.println("\n📤 Sending audio to Wit.ai...");
 
   HTTPClient http;
+  http.setTimeout(15000); // 15 seconds timeout
   http.begin(witAiUrl);
   http.addHeader("Authorization", String("Bearer ") + witAiToken);
   http.addHeader("Content-Type", "audio/raw;encoding=signed-integer;bits=16;rate=16000;endian=little");
@@ -132,28 +183,17 @@ void sendToWitAi() {
     String response = http.getString();
     Serial.printf("Response code: %d\n", httpResponseCode);
 
-    // Parse JSON response
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, response);
+    String transcribedText = parseWitAiResponse(response);
 
-    if (error) {
-      Serial.print("JSON parsing failed: ");
-      Serial.println(error.c_str());
+    if (transcribedText.length() > 0) {
+      Serial.println("\n✅ Transcribed Text:");
+      Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      Serial.println(transcribedText);
+      Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    } else {
+      Serial.println("No text found in response.");
       Serial.println("Raw response:");
       Serial.println(response);
-    } else {
-      // Extract text from response
-      if (doc.containsKey("text")) {
-        String transcribedText = doc["text"].as<String>();
-        Serial.println("\n✅ Transcribed Text:");
-        Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        Serial.println(transcribedText);
-        Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-      } else {
-        Serial.println("No text found in response");
-        Serial.println("Full response:");
-        Serial.println(response);
-      }
     }
   } else {
     Serial.printf("Error on HTTP request: %d\n", httpResponseCode);
@@ -173,6 +213,10 @@ void recordAudio() {
   esp_err_t result = i2s_read(I2S_PORT, &i2sData, I2S_BUFFER_SIZE, &bytesRead, portMAX_DELAY);
 
   if (result == ESP_OK && bytesRead > 0) {
+    // Apply digital volume gain to boost microphone sensitivity
+    int sampleCount = bytesRead / sizeof(int16_t);
+    applyGain((int16_t*)i2sData, sampleCount);
+
     // Check if buffer has space
     if (audioBufferIndex + bytesRead < maxRecordSize) {
       memcpy(audioBuffer + audioBufferIndex, i2sData, bytesRead);
@@ -182,7 +226,14 @@ void recordAudio() {
       Serial.println("\n⚠️  Maximum recording time reached!");
       stopRecording();
       sendToWitAi();
+      Serial.println("\nReady. Send '1' to start recording.\n");
     }
+  }
+
+  // Display 'recording' periodically while active
+  if (millis() - lastDisplayTime >= 800) {
+    lastDisplayTime = millis();
+    Serial.printf("...recording (%.1fs)...\n", (float)audioBufferIndex / 2.0 / SAMPLE_RATE);
   }
 }
 
@@ -209,10 +260,10 @@ void setup() {
   connectWiFi();
 
   Serial.println("\n📝 Instructions:");
-  Serial.println("   1. Press Enter to START recording");
+  Serial.println("   1. Type '1' and press Send to START recording");
   Serial.println("   2. Speak into the microphone");
-  Serial.println("   3. Press Enter a to STOP and transcribe");
-  Serial.println("\nReady! Waiting for your command...\n");
+  Serial.println("   3. Type '2' and press Send to STOP and transcribe");
+  Serial.println("\nReady! Waiting for command (1 = Start, 2 = Stop)...\n");
 }
 
 void loop() {
@@ -220,20 +271,19 @@ void loop() {
   if (Serial.available() > 0) {
     char input = Serial.read();
 
-    // Clear the serial buffer
-    while (Serial.available() > 0) {
-      Serial.read();
-    }
-
-    if (input == '\n' || input == '\r') {
+    if (input == '1') {
       if (!isRecording) {
-        // Start recording
         startRecording();
       } else {
-        // Stop recording and send to Wit.ai
+        Serial.println("\n⚠️ Already recording! Send '2' to stop.");
+      }
+    } else if (input == '2') {
+      if (isRecording) {
         stopRecording();
         sendToWitAi();
-        Serial.println("\nReady for next recording. Press Enter to start...\n");
+        Serial.println("\nReady for next recording. Send '1' to start...\n");
+      } else {
+        Serial.println("\n⚠️ Not currently recording! Send '1' to start.");
       }
     }
   }
