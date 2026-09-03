@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <vector>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -10,22 +11,22 @@
 //                    WIFI
 // =====================================================
 
-const char* ssid     = "wifi name";
-const char* password = "wifi password";
+const char* ssid     = "WiFi name";
+const char* password = "Wifi password";
 
 // =====================================================
 //                    API KEYS
 // =====================================================
 
-const char* witAiToken = "YOUR_WIT.AI_API_KEY";
+const char* witAiToken = "YOUR_WIT_AI_TOKEN"; // Replace with your Wit.ai token
 
-const char* witAiUrl ="https://api.wit.ai/speech?v=20220622";
+const char* witAiUrl = "https://api.wit.ai/speech?v=20220622";
 
-const char* geminiApiKey ="YOUR_GEMINI_API_KEY";
+const char* geminiApiKey ="YOUR_GEMINI_API_KEY"; // Replace with your Gemini API key
 
 // Use a model currently available to your API key.
 // Change this if necessary.
-const char* geminiModel = "gemini-3.5-flash";
+const char* geminiModel = "gemini-3.5-flash-lite";
 
 // =====================================================
 //              INMP441 MICROPHONE
@@ -39,6 +40,7 @@ const char* geminiModel = "gemini-3.5-flash";
 
 #define SAMPLE_RATE 16000
 #define I2S_BUFFER_SIZE 512
+#define VOLUME_GAIN 4           // Software gain multiplier (boosts mic sensitivity)
 
 // Maximum recording time
 #define RECORD_TIME_SECONDS 10
@@ -55,6 +57,17 @@ int audioBufferIndex = 0;
 bool isRecording = false;
 
 static i2s_chan_handle_t mic_rx_handle = NULL;
+
+// Function to amplify audio samples
+void applyGain(int16_t* samples, int count) {
+  for (int i = 0; i < count; i++) {
+    int32_t val = (int32_t)samples[i] * VOLUME_GAIN;
+    // Clip to 16-bit signed range [-32768, 32767]
+    if (val > 32767) val = 32767;
+    else if (val < -32768) val = -32768;
+    samples[i] = (int16_t)val;
+  }
+}
 
 // =====================================================
 //              MAX98357A SPEAKER
@@ -236,6 +249,10 @@ void recordAudio()
 
     if (result == ESP_OK && bytesRead > 0)
     {
+        // Apply digital volume gain to boost microphone sensitivity
+        int sampleCount = bytesRead / sizeof(int16_t);
+        applyGain((int16_t*)i2sData, sampleCount);
+
         if (audioBufferIndex + bytesRead < maxRecordSize)
         {
             memcpy(audioBuffer + audioBufferIndex, i2sData, bytesRead);
@@ -255,180 +272,97 @@ void recordAudio()
 //                  WIT.AI STT
 // =====================================================
 
+// Function to extract full text from Wit.ai multi-chunk/NDJSON response
+String parseWitAiResponse(const String& response) {
+  String bestText = "";
+  int searchPos = 0;
+
+  // Wit.ai returns chunked/newline-delimited JSON (NDJSON)
+  // We iterate through every JSON object in the response to extract the final full text
+  while (searchPos < response.length()) {
+    int objStart = response.indexOf('{', searchPos);
+    if (objStart == -1) break;
+
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, response.substring(objStart));
+    if (!error) {
+      if (!doc["text"].isNull()) {
+        String currentText = doc["text"].as<String>();
+        if (currentText.length() > 0) {
+          bestText = currentText;
+        }
+      }
+      // If final flag is present, this is definitely the complete sentence
+      if (doc["is_final"].is<bool>() && doc["is_final"].as<bool>()) {
+        break;
+      }
+    }
+
+    int nextLine = response.indexOf('\n', objStart);
+    if (nextLine != -1) {
+      searchPos = nextLine + 1;
+    } else {
+      break;
+    }
+  }
+
+  return bestText;
+}
+
 String sendToWitAI()
 {
     if (audioBufferIndex <= 0)
     {
-        Serial.println(
-            "❌ No audio recorded."
-        );
-
+        Serial.println("❌ No audio recorded.");
         return "";
     }
 
-
-    if (
-        WiFi.status() != WL_CONNECTED
-    )
+    if (WiFi.status() != WL_CONNECTED)
     {
-        Serial.println(
-            "❌ WiFi disconnected."
-        );
-
+        Serial.println("❌ WiFi disconnected.");
         return "";
     }
 
-
-    Serial.println();
-    Serial.println(
-        "📤 Sending audio to Wit.ai..."
-    );
-
-
-    WiFiClientSecure client;
-
-    client.setInsecure();
-
+    Serial.println("\n📤 Sending audio to Wit.ai...");
 
     HTTPClient http;
+    http.setTimeout(15000); // 15 seconds timeout
+    http.begin(witAiUrl);
+    http.addHeader("Authorization", String("Bearer ") + witAiToken);
+    http.addHeader("Content-Type", "audio/raw;encoding=signed-integer;bits=16;rate=16000;endian=little");
 
+    int httpResponseCode = http.POST(audioBuffer, audioBufferIndex);
 
-    if (!http.begin(
-            client,
-            witAiUrl
-        ))
+    if (httpResponseCode > 0)
     {
-        Serial.println(
-            "❌ Failed to connect to Wit.ai"
-        );
+        String response = http.getString();
+        Serial.printf("Wit.ai response code: %d\n", httpResponseCode);
 
-        return "";
-    }
+        String transcribedText = parseWitAiResponse(response);
 
-
-    http.setTimeout(60000);
-
-
-    String token = String(witAiToken);
-    token.trim();
-    http.addHeader("Authorization", "Bearer " + token);
-
-
-    http.addHeader(
-        "Content-Type",
-        "audio/raw;encoding=signed-integer;bits=16;rate=16000;endian=little"
-    );
-
-
-    int httpCode =
-        http.POST(
-            audioBuffer,
-            audioBufferIndex
-        );
-
-
-    if (httpCode > 0)
-    {
-        Serial.printf(
-            "Wit.ai HTTP code: %d\n",
-            httpCode
-        );
-
-
-        String response =
-            http.getString();
-
-
-        Serial.println(
-            "Wit.ai response:"
-        );
-
-        Serial.println(
-            response
-        );
-
-
-        if (
-            httpCode >= 200 &&
-            httpCode < 300
-        )
+        if (transcribedText.length() > 0)
         {
-            JsonDocument doc;
-
-            DeserializationError error =
-                deserializeJson(
-                    doc,
-                    response
-                );
-
-            if (error)
-            {
-                Serial.print(
-                    "❌ JSON parsing failed: "
-                );
-
-                Serial.println(
-                    error.c_str()
-                );
-
-                http.end();
-
-                return "";
-            }
-
-            if (doc["text"].is<const char*>() || doc["text"].is<String>())
-            {
-                String text = doc["text"].as<String>();
-                text.trim();
-
-
-                Serial.println();
-                Serial.println(
-                    "📝 RECOGNIZED SPEECH"
-                );
-
-                Serial.println(
-                    "--------------------------------"
-                );
-
-                Serial.println(
-                    text
-                );
-
-                Serial.println(
-                    "--------------------------------"
-                );
-
-
-                http.end();
-
-                return text;
-            }
-            else
-            {
-                Serial.println(
-                    "❌ Wit.ai did not return text."
-                );
-            }
+            Serial.println("\n✅ Transcribed Text:");
+            Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            Serial.println(transcribedText);
+            Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            http.end();
+            return transcribedText;
+        }
+        else
+        {
+            Serial.println("No text found in response.");
+            Serial.println("Raw response:");
+            Serial.println(response);
         }
     }
     else
     {
-        Serial.printf(
-            "❌ Wit.ai HTTP error: %d\n",
-            httpCode
-        );
-
-        Serial.println(
-            http.errorToString(
-                httpCode
-            )
-        );
+        Serial.printf("❌ Wit.ai HTTP error: %d\n", httpResponseCode);
+        Serial.println(http.errorToString(httpResponseCode));
     }
 
-
     http.end();
-
     return "";
 }
 
@@ -523,7 +457,7 @@ String askGemini(
 
     // Generation configuration
     JsonObject generationConfig = requestDoc["generationConfig"].to<JsonObject>();
-    generationConfig["maxOutputTokens"] = 200;
+    generationConfig["maxOutputTokens"] = 600;
 
     String requestBody;
     serializeJson(requestDoc, requestBody);
@@ -612,28 +546,130 @@ String askGemini(
 //                  GOOGLE TTS
 // =====================================================
 
-void speakText(
-    const String& text
-)
+std::vector<String> ttsQueue;
+bool isSpeaking = false;
+
+// Function to clean text for TTS (removes markdown formatting)
+String cleanTextForTTS(const String& input) {
+    String clean = "";
+    clean.reserve(input.length());
+
+    for (size_t i = 0; i < input.length(); i++) {
+        char c = input[i];
+        if (c == '\n' || c == '\r' || c == '\t') {
+            clean += ' ';
+        } else if (c == '*' || c == '#' || c == '_' || c == '`' || c == '~' ||
+                   c == '>' || c == '|' || c == '[' || c == ']' || c == '(' || c == ')') {
+            clean += ' ';
+        } else {
+            if (c == ' ' && clean.length() > 0 && clean[clean.length() - 1] == ' ') {
+                continue;
+            }
+            clean += c;
+        }
+    }
+    clean.trim();
+    return clean;
+}
+
+// Function to split text into chunks suitable for Google TTS (<= 100 characters)
+void queueTTSChunks(const String& text) {
+    ttsQueue.clear();
+    String cleaned = cleanTextForTTS(text);
+    if (cleaned.length() == 0) return;
+
+    const size_t MAX_CHUNK_LEN = 100;
+    int start = 0;
+    int len = cleaned.length();
+
+    while (start < len) {
+        if (len - start <= (int)MAX_CHUNK_LEN) {
+            String chunk = cleaned.substring(start);
+            chunk.trim();
+            if (chunk.length() > 0) {
+                ttsQueue.push_back(chunk);
+            }
+            break;
+        }
+
+        int splitAt = -1;
+        int maxSearch = start + MAX_CHUNK_LEN;
+
+        // 1. Try finding sentence end (. ! ? ;)
+        for (int i = maxSearch; i >= start + 20; i--) {
+            char c = cleaned[i];
+            if (c == '.' || c == '!' || c == '?' || c == ';') {
+                splitAt = i + 1;
+                break;
+            }
+        }
+
+        // 2. If no sentence end, try comma or colon (, :)
+        if (splitAt == -1) {
+            for (int i = maxSearch; i >= start + 20; i--) {
+                char c = cleaned[i];
+                if (c == ',' || c == ':') {
+                    splitAt = i + 1;
+                    break;
+                }
+            }
+        }
+
+        // 3. If no punctuation, split at last space
+        if (splitAt == -1) {
+            for (int i = maxSearch; i >= start + 10; i--) {
+                if (cleaned[i] == ' ') {
+                    splitAt = i;
+                    break;
+                }
+            }
+        }
+
+        // 4. Fallback: hard cut
+        if (splitAt == -1) {
+            splitAt = maxSearch;
+        }
+
+        String chunk = cleaned.substring(start, splitAt);
+        chunk.trim();
+        if (chunk.length() > 0) {
+            ttsQueue.push_back(chunk);
+        }
+
+        start = splitAt;
+        while (start < len && cleaned[start] == ' ') {
+            start++;
+        }
+    }
+}
+
+void speakText(const String& text)
 {
-    if (
-        text.length() == 0
-    )
+    if (text.length() == 0)
     {
         return;
     }
 
-
     Serial.println();
-    Serial.println(
-        "🔊 Sending Gemini response to Google TTS..."
-    );
+    Serial.println("🔊 Preparing Google TTS playback...");
 
+    queueTTSChunks(text);
 
-    audio.connecttospeech(
-        text.c_str(),
-        "en"
-    );
+    Serial.printf("Split into %d TTS chunks for playback.\n", ttsQueue.size());
+
+    if (!ttsQueue.empty())
+    {
+        isSpeaking = true;
+        Serial.printf("🔊 Playing chunk [1/%d]: %s\n", ttsQueue.size(), ttsQueue[0].c_str());
+        bool ok = audio.connecttospeech(ttsQueue[0].c_str(), "en");
+        if (!ok) {
+            Serial.println("❌ Failed to connect to TTS for first chunk.");
+            ttsQueue.erase(ttsQueue.begin());
+            if (ttsQueue.empty()) {
+                isSpeaking = false;
+            }
+        }
+    }
 }
 
 
@@ -782,6 +818,39 @@ void loop()
     // Keep Google TTS audio processing alive
     audio.loop();
 
+    // Check if TTS is active and advance chunks when the current one finishes
+    if (isSpeaking)
+    {
+        if (!audio.isRunning())
+        {
+            if (!ttsQueue.empty())
+            {
+                ttsQueue.erase(ttsQueue.begin());
+            }
+
+            if (!ttsQueue.empty())
+            {
+                Serial.printf("🔊 Playing next chunk (%d remaining): %s\n", (int)ttsQueue.size(), ttsQueue[0].c_str());
+                bool ok = audio.connecttospeech(ttsQueue[0].c_str(), "en");
+                if (!ok) {
+                    Serial.println("❌ Failed to connect for chunk, skipping...");
+                    ttsQueue.erase(ttsQueue.begin());
+                    if (ttsQueue.empty()) {
+                        isSpeaking = false;
+                    }
+                }
+                delay(10);
+            }
+            else
+            {
+                isSpeaking = false;
+                Serial.println("\n🔊 Finished speaking entire response.");
+                Serial.println("Ready for next question.");
+                Serial.println("Send '1' and press ENTER to record again.\n");
+            }
+        }
+    }
+
     // Handle Serial commands
     if (Serial.available() > 0)
     {
@@ -794,6 +863,14 @@ void loop()
 
             if (cmd == '1')
             {
+                if (isSpeaking)
+                {
+                    // Interrupt speech if new recording is triggered
+                    audio.stopSong();
+                    ttsQueue.clear();
+                    isSpeaking = false;
+                }
+
                 if (!isRecording)
                 {
                     startRecording();
