@@ -8,27 +8,27 @@
 //                    WIFI
 // =====================================================
 const char* ssid     = "WiFi name";  // Your Wi-Fi SSID
-const char* password = "WiFi password";  // Your Wi-Fi password
+const char* password = "Wi-Fi password";  // Your Wi-Fi password
 // =====================================================
 //                    GEMINI
 // =====================================================
-const char* geminiApiKey = "YOUR_GEMINI_API_KEY";  // Your Gemini API key
+const char* geminiApiKey = "YOUR GEMINI API KEY";  // Your Gemini API key
 const char* model = "gemini-3.5-flash";
-const int maxTokens = 1000;
+const int maxTokens = 300;
 // =====================================================
 //                    WIT.AI
 // =====================================================
 // IMPORTANT:
 // This MUST be your Wit.ai Server Access Token.
 // It is NOT your Gemini API key.
-const char* witToken = "YOUR_WITAI_SERVER_ACCESS_TOKEN";  // Your
+const char* witToken = "YOUR WIT.AI SERVER ACCESS TOKEN";
 // =====================================================
 //                    MAX98357A
 // =====================================================
 // Your original WitAITTS sketch uses these pins.
-#define CUSTOM_BCLK 6
-#define CUSTOM_LRC  11
-#define CUSTOM_DIN  12
+#define CUSTOM_BCLK 7
+#define CUSTOM_LRC  8
+#define CUSTOM_DIN  9
 WitAITTS tts(CUSTOM_BCLK, CUSTOM_LRC, CUSTOM_DIN);
 // =====================================================
 //                 ASK GEMINI
@@ -150,12 +150,12 @@ void speakAnswer(String answer) {
   // ---------------------------------------------------
   // WitAITTS maximum = 280 characters
   // ---------------------------------------------------
-  if (answer.length() > 500) {
+  if (answer.length() > 280) {
     Serial.println();
     Serial.println("⚠️ Gemini response is longer than 280 characters.");
     Serial.println("Truncating for Wit.ai...");
     answer =
-      answer.substring(0, 500);
+      answer.substring(0, 280);
     // Try to avoid ending halfway through a word.
     int lastSpace =
       answer.lastIndexOf(' ');
